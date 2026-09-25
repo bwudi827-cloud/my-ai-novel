@@ -529,3 +529,6 @@ elif st.session_state.current_page == "relations":
     col_stat3.metric("正文字数", len(st.session_state.novel_text))
     st.caption(f"上次自动快照时间：{st.session_state.auto_save_time if st.session_state.auto_save_time else '暂无'}")
     if st.button("💾 立即执行快照保存"): auto_save_snapshot()
+        "Aion-3.0 (专为小说优化)": {"url": "https://api.aionlabs.ai/v1", "model": "aion-labs/aion-3.0"},
+"Aion-2.0 (专为小说优化)": {"url": "https://api.aionlabs.ai/v1", "model": "aion-labs/aion-2.0"},
+"蚂蚁百灵 (长文本优化)": {"url": "https://api.lingyiwanwu.com/v1", "model": "ling-2.6-flash"},
