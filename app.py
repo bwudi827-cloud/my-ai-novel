@@ -1,531 +1,1030 @@
-import streamlit as st
-from openai import OpenAI
+# -*- coding: utf-8 -*-
+"""
+AI 小说工坊 · 多智能体剧团版
+==============================
+一个"多 AI 独立记忆、自动演小说"的互动式写作平台。
+
+用户 = 导演，AI = 演员。
+  · 规划 AI   —— 生成世界观、大纲、人物骨架
+  · 主角 AI   —— 独立人设、秘密、专属记忆
+  · 配角 AI   —— 独立人设与记忆
+  · 龙套 AI   —— 无名路人，台词超标自动升级为配角
+  · 叙述者 AI —— 把对话与行动剪辑成文学化正文，禁止内心描写
+
+核心机制：
+  信息物理隔离 · 场外生活模拟 · 记忆压缩 · @唤醒 · 台词改写
+  手动篡改记忆 · 章节确认 · 多项目管理 · 剧情推演 · 命运骰子
+  双层 API 路由 · TXT / JSON 双导出
+"""
+
 import json
-import time
-import random
-import datetime
-from typing import Dict, Any, Tuple
+import re
+import uuid
+from datetime import datetime
 
-# ==============================================================================
-# 一、 全局配置与数据初始化
-# ==============================================================================
-st.set_page_config(page_title="AI导演终极工作台", layout="wide", initial_sidebar_state="expanded")
-COLOR_PALETTE = ["#FF6B6B", "#FFA502", "#FFD32A", "#2ED573", "#00D2D3", "#1E90FF", "#A29BFE"]
-EMOJI_POOL = ["🕵️", "👩‍🎨", "🧔", "👩‍🦰", "👨‍🔬", "👮", "👩‍🏫", "🧙", "🥷", "🤴", "👸", "🧛", "🧟", "🧝", "🧚", "👽", "🤖", "🧑‍🚀", "🥸", "🤠"]
+import streamlit as st
 
-API_PROVIDERS = {
-    "DeepSeek (便宜聪明)": {"url": "https://api.deepseek.com", "model": "deepseek-chat"},
-    "Groq (免费极速)": {"url": "https://api.groq.com/openai/v1", "model": "llama-3.3-70b-versatile"},
-    "OpenRouter (免费聚合)": {"url": "https://openrouter.ai/api/v1", "model": "meta-llama/llama-3.3-70b-instruct:free"},
-    "智谱GLM-4-Flash (完全免费)": {"url": "https://open.bigmodel.cn/api/paas/v4/", "model": "glm-4-flash"},
-    "Kimi (月之暗面)": {"url": "https://api.moonshot.cn/v1", "model": "moonshot-v1-8k"},
-    "通义千问 (阿里)": {"url": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model": "qwen-plus"},
-    "ModelScope (魔搭)": {"url": "https://api-inference.modelscope.cn/v1", "model": "qwen-plus"},
-    "自定义": {"url": "", "model": ""}
-}
+# ============================================================
+# 0. 页面配置
+# ============================================================
+st.set_page_config(
+    page_title="AI 小说工坊",
+    page_icon="🎭",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
 
-RANDOM_EVENTS = [
-    "突然，整个房间陷入一片漆黑，停电了。", "一声极其刺耳的巨响从门外传来，像是什么东西砸在了墙上。",
-    "你的手机突然震动，屏幕上显示一条匿名短信：『我知道你在哪。』", "窗外划过一道闪电，照亮了角落里一个你不曾注意到的黑影。",
-    "空气中弥漫起一股奇怪的焦糊味，像是什么东西烧着了。", "有人重重地敲门，声音急促，带着明显的恐惧。",
-    "地面突然开始剧烈震动，桌上的水杯掉在地上摔得粉碎。", "房间里的温度瞬间下降，你呼出的气变成了白雾。"
+st.markdown(
+    """
+    <style>
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        .stDeployButton {display: none;}
+        .block-container {padding-top: 1rem; padding-bottom: 4rem;}
+        [data-testid="stChatMessage"] {padding: 0.5rem 0.2rem;}
+        textarea {font-size: 16px !important;}
+        .narration {
+            color: #888;
+            font-style: italic;
+            padding: 6px 12px;
+            border-left: 3px solid #ccc;
+            margin: 6px 0;
+        }
+        .director {
+            color: #b06;
+            font-weight: 600;
+            padding: 4px 0;
+        }
+        .chap {
+            background: #f5f5f5;
+            border-radius: 6px;
+            padding: 8px 12px;
+            margin: 8px 0;
+            font-size: 0.9em;
+            color: #666;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ============================================================
+# 1. 常量池
+# ============================================================
+COLOR_POOL = [
+    "#e74c3c", "#3498db", "#2ecc71", "#f39c12",
+    "#9b59b6", "#1abc9c", "#e67e22", "#34495e",
 ]
+EMOJI_POOL = ["🐉", "🦊", "🐺", "🐯", "🦁", "🐸", "🐼", "🦉",
+              "🐙", "🦅", "🐍", "🐴", "🦌", "🐳", "🦋", "🐢"]
 
-def init_system_state():
-    defaults = {
-        "projects": {"默认项目": {"worldview": "", "outline": "", "messages": [], "characters": {}, "novel_text": ""}},
-        "current_project": "默认项目", "worldview": "", "outline": "", "messages": [], "characters": {},
-        "novel_text": "", "user": "导演", "api_key": "", "base_url": "https://api.deepseek.com",
-        "model_name": "deepseek-chat", "theme": "默认暗色", "font_size": 16, "current_input": "",
-        "style_pool": [], "style_profile": "", "temperature": 0.9,
-        "prompt_director": "你是一个导演，正在指挥演员表演。",
-        "prompt_character": "请严格遵循你的人设和秘密回应，不要客套，直接输出台词。",
-        "prompt_narrator": "第三人称，只写可观察到的动作、神态、对白和环境，绝对不写任何人的内心活动。",
-        "custom_quick_commands": ["⚡ 突发事件", "👥 全员会议", "📦 压缩记忆", "🌧️ 下雨", "🌙 深夜"],
-        "auto_save_time": "", "current_page": "chat", "pending_chapter": "", "edit_index": None, "edit_text": ""
-    }
-    for key, value in defaults.items():
-        if key not in st.session_state: st.session_state[key] = value
-init_system_state()
+ROLE_ORDER = ["主角", "配角", "龙套"]
+ROLE_TAG = {"主角": "⭐", "配角": "🎗️", "龙套": "👤"}
 
-def save_current_project():
-    st.session_state.projects[st.session_state.current_project] = {
-        "worldview": st.session_state.worldview, "outline": st.session_state.outline,
-        "messages": st.session_state.messages, "characters": st.session_state.characters,
-        "novel_text": st.session_state.novel_text
-    }
 
-def load_project(project_name):
-    data = st.session_state.projects[project_name]
-    st.session_state.current_project = project_name
-    st.session_state.worldview = data.get("worldview", ""); st.session_state.outline = data.get("outline", "")
-    st.session_state.messages = data.get("messages", []); st.session_state.characters = data.get("characters", {})
-    st.session_state.novel_text = data.get("novel_text", "")
+# ============================================================
+# 2. 工具函数
+# ============================================================
+def now_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M")
 
-def get_ai_client(char_name: str = None) -> Tuple[OpenAI, str]:
-    if char_name and char_name in st.session_state.characters:
-        char = st.session_state.characters[char_name]
-        if char.get('api_key') and char.get('base_url'): return OpenAI(api_key=char['api_key'], base_url=char['base_url']), char.get('model_name', 'deepseek-chat')
-    return OpenAI(api_key=st.session_state.get("api_key", ""), base_url=st.session_state.get("base_url", "https://api.deepseek.com")), st.session_state.get("model_name", "deepseek-chat")
 
-def get_char_color(name: str) -> str:
-    if not name: return "#FFFFFF"
-    names = list(st.session_state.characters.keys())
-    return COLOR_PALETTE[names.index(name) % len(COLOR_PALETTE)] if name in names else "#FFFFFF"
+def new_id() -> str:
+    return uuid.uuid4().hex[:8]
 
-def get_char_emoji(name: str) -> str:
-    if not name: return "🎭"
-    names = list(st.session_state.characters.keys())
-    return EMOJI_POOL[names.index(name) % len(EMOJI_POOL)] if name in names else "🎭"
 
-def typewriter_effect(placeholder, text: str, speed: float = 0.015):
-    displayed = ""
-    for char in text:
-        displayed += char
-        placeholder.markdown(displayed, unsafe_allow_html=True)
-        time.sleep(speed)
+def pick_color(existing: list) -> str:
+    used = {c.get("color") for c in existing}
+    for col in COLOR_POOL:
+        if col not in used:
+            return col
+    return COLOR_POOL[len(existing) % len(COLOR_POOL)]
 
-def auto_save_snapshot():
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    st.session_state.auto_save_time = now
-    st.toast(f"💾 系统已自动快照保存于 {now}")
 
-def map_reduce_style_distillation(raw_text: str, style_name: str, client, model: str) -> str:
-    chunk_size = 4000
-    chunks = [raw_text[i:i+chunk_size] for i in range(0, len(raw_text), chunk_size)]
-    progress_text = st.empty(); progress_bar = st.progress(0); all_summaries = []
-    for idx, chunk in enumerate(chunks):
-        progress_text.text(f"正在分析第 {idx+1}/{len(chunks)} 个片段...")
-        prompt = f"请阅读以下小说片段（第 {idx+1} 部分）。提取其叙事视角、语言节奏、人设特质、对话潜台词、爽点/糖点逻辑。只输出 JSON 格式：{{\"outline\": \"本段核心剧情\", \"style_analysis\": \"本段文风剖析\"}}\n片段内容：\n{chunk}"
-        try:
-            res = client.chat.completions.create(model=model, messages=[{"role": "user", "content": prompt}], temperature=0.6, response_format={"type": "json_object"})
-            data = json.loads(res.choices[0].message.content.strip())
-            all_summaries.append({"outline": data.get("outline", ""), "style": data.get("style_analysis", "")})
-        except: pass
-        progress_bar.progress((idx + 1) / len(chunks))
-    progress_text.text("正在合并分析结果，生成最终风格指南...")
-    combined_text = "\n".join([f"【片段 {i+1}】剧情：{s['outline']}\n文风：{s['style']}" for i, s in enumerate(all_summaries)])
-    final_prompt = f"""你是一位精通网文市场的金牌编辑。请根据以下分块分析报告，提炼并生成一份极度详尽的【{style_name} 写作风格与套路指南】。
-必须严格包含以下模块：
-# {style_name} 写作风格指南
-## 一、 风格定义与核心情绪
-## 二、 核心驱动力（拉糖/虐点/升级爽点）
-## 三、 叙事视角与信息差
-## 四、 语言节奏与标点符号用法
-## 五、 对话与潜台词公式
-## 六、 人设配置与反差感
-## 七、 情节编排与转场公式
-## 八、 避坑指南与自检清单
-分析报告：\n{combined_text}"""
+def pick_emoji(existing: list) -> str:
+    used = {c.get("emoji") for c in existing}
+    for e in EMOJI_POOL:
+        if e not in used:
+            return e
+    return EMOJI_POOL[len(existing) % len(EMOJI_POOL)]
+
+
+def get_secret(key: str, default: str = "") -> str:
     try:
-        final_res = client.chat.completions.create(model=model, messages=[{"role": "user", "content": final_prompt}], temperature=0.7)
-        progress_text.empty(); progress_bar.empty()
-        return final_res.choices[0].message.content.strip()
+        return st.secrets[key]
+    except Exception:
+        return default
+
+
+def count_sentences(text: str) -> int:
+    """粗略统计句子数，用于龙套升级判断。"""
+    return len([s for s in re.split(r"[。！？!?…]+", text) if s.strip()])
+
+
+# ============================================================
+# 3. 状态初始化
+# ============================================================
+def new_project(name: str = "新剧本") -> dict:
+    return {
+        "id": new_id(),
+        "name": name,
+        "created": now_str(),
+        "world": {
+            "title": "", "genre": "", "era": "",
+            "places": "", "rules": "", "style": "",
+        },
+        "outline": "",        # 总大纲
+        "sub_outline": "",    # 细纲
+        "characters": [],     # 角色列表
+        "chat": [],           # 聊天流
+        "chapter_buffer": [], # 待确认的章节正文
+    }
+
+
+def init_state():
+    if "projects" not in st.session_state:
+        p = new_project("剧本一")
+        st.session_state.projects = {p["id"]: p}
+        st.session_state.current_pid = p["id"]
+
+    if "api" not in st.session_state:
+        st.session_state.api = {
+            "api_key": get_secret("OPENAI_API_KEY", ""),
+            "base_url": get_secret("OPENAI_BASE_URL", ""),
+            "model": get_secret("OPENAI_MODEL", ""),
+            "temperature": 0.85,
+        }
+
+    if "last_upload" not in st.session_state:
+        st.session_state.last_upload = None
+
+    if "pending_chapter" not in st.session_state:
+        st.session_state.pending_chapter = None
+
+
+init_state()
+
+
+def P() -> dict:
+    """当前项目。"""
+    return st.session_state.projects[st.session_state.current_pid]
+
+
+# ============================================================
+# 4. 角色操作
+# ============================================================
+def add_character(name, role, desc="", secret="", status="存活") -> dict:
+    p = P()
+    ch = {
+        "id": new_id(),
+        "name": name,
+        "role": role,
+        "status": status,
+        "desc": desc,
+        "secret": secret,
+        "memory": [],           # 私有长期记忆
+        "offstage": "",         # 场外状态
+        "speech_count": 0,      # 累计台词句数（龙套升级用）
+        "color": pick_color(p["characters"]),
+        "emoji": pick_emoji(p["characters"]),
+        "api_override": None,   # 独立 API 配置（双层路由）
+    }
+    p["characters"].append(ch)
+    return ch
+
+
+def find_char(name: str):
+    for c in P()["characters"]:
+        if c["name"] == name:
+            return c
+    return None
+
+
+def get_char(cid: str):
+    for c in P()["characters"]:
+        if c["id"] == cid:
+            return c
+    return None
+
+
+# ============================================================
+# 5. 聊天流操作
+# ============================================================
+def push_msg(mtype: str, content: str, speaker: str = "", cid: str = ""):
+    """mtype: narration / character / director / chapter"""
+    P()["chat"].append({
+        "type": mtype,
+        "speaker": speaker,
+        "cid": cid,
+        "content": content,
+        "ts": now_str(),
+    })
+
+
+# ============================================================
+# 6. 信息隔离：构建角色上下文
+# ============================================================
+def build_character_context(ch: dict) -> str:
+    """
+    信息隔离核心：
+      · 共享：世界观、大纲、公开对话记录
+      · 私有：该角色的秘密、私有记忆、场外状态
+    """
+    p = P()
+    w = p["world"]
+
+    parts = [
+        f"你正在扮演角色「{ch['name']}」（{ch['role']}）。",
+        "严格以该角色的立场、性格、认知发言。",
+        "只输出该角色的动作与台词，不要写其他角色的内心。",
+        "格式示例：（动作描写）台词内容。",
+        "",
+    ]
+
+    # 世界观（共享）
+    world_lines = []
+    for k, label in [("title", "书名"), ("genre", "类型"), ("era", "背景"),
+                     ("places", "地点"), ("rules", "规则"), ("style", "文风")]:
+        if w.get(k):
+            world_lines.append(f"{label}：{w[k]}")
+    if world_lines:
+        parts.append("===== 世界观 =====")
+        parts.extend(world_lines)
+        parts.append("")
+
+    if p["outline"]:
+        parts.append("===== 总大纲 =====")
+        parts.append(p["outline"])
+        parts.append("")
+    if p["sub_outline"]:
+        parts.append("===== 细纲 =====")
+        parts.append(p["sub_outline"])
+        parts.append("")
+
+    # 该角色的人设与秘密（私有）
+    parts.append(f"===== 你（{ch['name']}）的设定 =====")
+    parts.append(f"身份：{ch['role']}")
+    parts.append(f"状态：{ch.get('status','存活')}")
+    if ch.get("desc"):
+        parts.append(f"人设：{ch['desc']}")
+    if ch.get("secret"):
+        parts.append(f"你的秘密（绝不可直接说破）：{ch['secret']}")
+    parts.append("")
+
+    # 私有记忆
+    if ch.get("memory"):
+        parts.append("===== 你的私有记忆 =====")
+        parts.extend(f"{i+1}. {m}" for i, m in enumerate(ch["memory"]))
+        parts.append("")
+
+    # 场外状态
+    if ch.get("offstage"):
+        parts.append("===== 你的场外近况 =====")
+        parts.append(ch["offstage"])
+        parts.append("")
+
+    # 公开对话记录（共享）
+    recent = p["chat"][-24:]
+    if recent:
+        parts.append("===== 公开对话记录 =====")
+        for m in recent:
+            if m["type"] == "character":
+                parts.append(f"{m['speaker']}：{m['content']}")
+            elif m["type"] == "director":
+                parts.append(f"（导演指令）{m['content']}")
+            elif m["type"] == "narration":
+                parts.append(f"（旁白）{m['content']}")
+        parts.append("")
+
+    parts.append("请以该角色的身份续演，保持人设一致。")
+    return "\n".join(parts)
+
+
+def build_narrator_context() -> str:
+    """叙述者 AI：只客观描述，禁止内心描写。"""
+    p = P()
+    w = p["world"]
+
+    parts = [
+        "你是小说旁白与剪辑师。你的任务是把角色的对话与行动，",
+        "润色成文学化的小说正文段落。",
+        "",
+        "铁律：",
+        "1. 绝对禁止描写任何角色的内心活动。",
+        "   不得出现「他想」「她暗自」「心中一惊」「意识到」这类词。",
+        "2. 只客观描述：动作、神态、对白、环境、声音、光影。",
+        "3. 保持文风与世界观一致。",
+        "4. 只输出正文，不要标题、序号或 Markdown 标记。",
+        "",
+    ]
+
+    if w.get("style"):
+        parts.append(f"文风要求：{w['style']}")
+        parts.append("")
+    if w.get("places"):
+        parts.append(f"场景：{w['places']}")
+        parts.append("")
+
+    # 取最近一段对话作为素材
+    recent = [m for m in p["chat"][-14:] if m["type"] in ("character", "director", "narration")]
+    if recent:
+        parts.append("===== 素材 =====")
+        for m in recent:
+            if m["type"] == "character":
+                parts.append(f"{m['speaker']}：{m['content']}")
+            elif m["type"] == "director":
+                parts.append(f"（导演要求）{m['content']}")
+            elif m["type"] == "narration":
+                parts.append(f"（已有旁白）{m['content']}")
+        parts.append("")
+        parts.append("请把以上素材剪辑成一段连贯的小说正文。")
+
+    return "\n".join(parts)
+
+
+def build_planner_prompt(task: str) -> str:
+    """规划 AI：世界观 / 大纲 / 人物骨架。"""
+    p = P()
+    w = p["world"]
+    info = []
+    if w.get("title"):
+        info.append(f"书名：{w['title']}")
+    if w.get("genre"):
+        info.append(f"类型：{w['genre']}")
+    if w.get("era"):
+        info.append(f"背景：{w['era']}")
+    if w.get("rules"):
+        info.append(f"规则：{w['rules']}")
+    if p.get("outline"):
+        info.append(f"现有大纲：{p['outline']}")
+
+    return (
+        "你是剧本架构师。根据下面已有的设定，完成用户的规划请求。\n"
+        "直接输出结果，不要客套话，不要 Markdown 标题符号。\n\n"
+        + "\n".join(info)
+        + f"\n\n用户的请求：{task}"
+    )
+
+
+# ============================================================
+# 7. API 调用（双层路由）
+# ============================================================
+def get_client(ch: dict = None):
+    from openai import OpenAI
+
+    cfg = st.session_state.api
+    api_key = cfg["api_key"]
+    base_url = cfg["base_url"]
+    model = cfg["model"]
+
+    # 独立配置优先
+    if ch and ch.get("api_override"):
+        ov = ch["api_override"]
+        api_key = ov.get("api_key") or api_key
+        base_url = ov.get("base_url") or base_url
+        model = ov.get("model") or model
+
+    if not api_key:
+        raise RuntimeError("未配置 API Key")
+
+    return OpenAI(api_key=api_key, base_url=base_url or None, timeout=180.0), model
+
+
+def call_ai(system: str, user: str, ch: dict = None, temperature=None) -> str:
+    client, model = get_client(ch)
+    temp = temperature if temperature is not None else float(
+        st.session_state.api["temperature"]
+    )
+    resp = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        temperature=temp,
+        max_tokens=1600,
+    )
+    return resp.choices[0].message.content
+
+
+# ============================================================
+# 8. 核心生成：角色发言 / 旁白
+# ============================================================
+def generate_speech(ch: dict, instruction: str) -> str:
+    """让某个角色说台词、做动作。"""
+    system = build_character_context(ch)
+    user = instruction.strip() or "请自然接续当前场景，说一句台词并做一个动作。"
+    return call_ai(system, user, ch=ch)
+
+
+def generate_narration() -> str:
+    system = build_narrator_context()
+    user = "请生成旁白正文。"
+    return call_ai(system, user, temperature=0.6)
+
+
+# ============================================================
+# 9. 龙套升级机制
+# ============================================================
+def check_rookie_upgrade(ch: dict):
+    """龙套台词超过两句话，自动升级为配角并建档。"""
+    if ch.get("role") != "龙套":
+        return False
+    if ch.get("speech_count", 0) >= 3:
+        ch["role"] = "配角"
+        # 自动生成人设与秘密
+        if not ch.get("desc"):
+            try:
+                sys = (
+                    f"根据下列小说片段，为临时角色「{ch['name']}」补一份简短人设：\n"
+                    "一段 40 字内的性格 / 外貌描述，以及一句 30 字内的秘密。\n"
+                    "输出格式：\n人设：xxx\n秘密：xxx"
+                )
+                snippet = "\n".join(
+                    m["content"] for m in P()["chat"][-8:]
+                    if m.get("cid") == ch["id"]
+                )[:1200]
+                raw = call_ai(sys, snippet or ch["name"])
+                for line in raw.splitlines():
+                    if line.startswith("人设："):
+                        ch["desc"] = line.replace("人设：", "").strip()
+                    elif line.startswith("秘密："):
+                        ch["secret"] = line.replace("秘密：", "").strip()
+            except Exception:
+                pass
+        push_msg("narration", f"※「{ch['name']}」的戏份增多，已正式建档为配角。")
+        return True
+    return False
+
+
+# ============================================================
+# 10. 记忆压缩
+# ============================================================
+def compress_memory():
+    """把聊天流前段浓缩成摘要，存入相关角色的私有记忆。"""
+    p = P()
+    if len(p["chat"]) < 6:
+        return False, "对话太短，无需压缩。"
+
+    transcript = "\n".join(
+        f"{m['speaker'] or '旁白'}：{m['content']}" if m["type"] == "character"
+        else f"（{m['type']}）{m['content']}"
+        for m in p["chat"]
+    )[-12000:]
+
+    sys = (
+        "把下面这份剧本对话压缩成 5～8 条要点，按时间顺序，"
+        "每条一句话，保留关键情节、人物状态变化与伏笔。"
+        "每行输出一条，不要编号以外的多余文字。"
+    )
+    try:
+        raw = call_ai(sys, transcript, temperature=0.3)
+        lines = [ln.strip().lstrip("0123456789.、-· ") for ln in raw.splitlines() if ln.strip()]
+        lines = [ln for ln in lines if len(ln) > 3][:8]
     except Exception as e:
-        progress_text.empty(); progress_bar.empty()
-        return f"合并失败：{e}"
+        return False, f"压缩失败：{e}"
 
-def inject_theme_css(theme_mode, font_size):
-    base_css = f"""<style>p,div,h1,h2,h3,label {{ font-size: {font_size}px !important; }} [data-testid="stChatMessage"] {{ padding: 15px; border-radius: 12px; margin-bottom: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }} .stButton>button {{ width: 100%; border-radius: 8px; font-weight: 500; transition: all 0.2s; }} .stButton>button:hover {{ transform: scale(1.02); }}</style>"""
-    if theme_mode == "纯黑极简": base_css += "<style>.stApp { background-color: #000; color: #fff; } [data-testid='stChatMessage'] { background-color: #1a1a1a; }</style>"
-    elif theme_mode == "护眼浅色": base_css += "<style>.stApp { background-color: #f5f5dc; color: #333; } [data-testid='stChatMessage'] { background-color: #fff; }</style>"
-    elif theme_mode == "赛博朋克紫": base_css += "<style>.stApp { background-color: #1a0b2e; color: #00ffff; } [data-testid='stChatMessage'] { background-color: #2d144b; border: 1px solid #00ffff; }</style>"
-    else: base_css += "<style>[data-testid='stChatMessage'] { background-color: #262730; }</style>"
-    st.markdown(base_css, unsafe_allow_html=True)
-inject_theme_css(st.session_state.theme, st.session_state.font_size)
+    # 存入所有主要角色的私有记忆
+    for ch in p["characters"]:
+        if ch["role"] in ("主角", "配角"):
+            ch["memory"] = (ch["memory"] + lines)[-20:]
 
-# ==============================================================================
-# 二、 侧边栏（全局控制与备份）
-# ==============================================================================
-with st.sidebar:
-    st.title("🎬 导演控制台")
-    st.divider()
-    st.subheader("🎛️ 导航与刷新")
-    page_options = {"💬 导演聊天室": "chat", "📖 小说正文": "novel", "👥 角色管理": "cast", "🔬 风格蒸馏": "tools", "🕸️ 关系网": "relations"}
-    selected_page = st.radio("页面切换", list(page_options.keys()), index=list(page_options.values()).index(st.session_state.current_page))
-    st.session_state.current_page = page_options[selected_page]
-    col_act1, col_act2 = st.columns(2)
-    with col_act1:
-        if st.button("↩️ 返回主页", use_container_width=True):
-            st.session_state.current_page = "chat"; st.rerun()
-    with col_act2:
-        if st.button("🔄 安全刷新", use_container_width=True):
-            st.toast("💾 数据已保存，正在刷新界面..."); time.sleep(0.5); st.rerun()
+    # 保留最近 4 条聊天，其余清空（防止上下文过长）
+    p["chat"] = p["chat"][-4:]
+    push_msg("narration", f"※ 剧情已压缩为 {len(lines)} 条长期记忆。")
+    return True, f"已生成 {len(lines)} 条记忆并写入各角色。"
 
-    st.divider()
-    st.subheader("📂 项目/剧本管理")
-    project_list = list(st.session_state.projects.keys())
-    selected_proj = st.selectbox("当前剧本", project_list, index=project_list.index(st.session_state.current_project))
-    if selected_proj != st.session_state.current_project: save_current_project(); load_project(selected_proj); st.rerun()
-    col_p1, col_p2 = st.columns(2)
-    with col_p1:
-        if st.button("➕ 新建项目"):
-            new_proj_name = f"新项目_{len(project_list)+1}"
-            st.session_state.projects[new_proj_name] = {"worldview": "", "outline": "", "messages": [], "characters": {}, "novel_text": ""}
-            save_current_project(); load_project(new_proj_name); st.rerun()
-    with col_p2:
-        if st.button("🗑️ 删除项目"):
-            if len(project_list) > 1:
-                del st.session_state.projects[st.session_state.current_project]; load_project(list(st.session_state.projects.keys())[0]); st.rerun()
-            else: st.warning("至少保留一个项目。")
 
-    st.divider()
-    st.subheader("🤖 全局 API 路由")
-    provider_name = st.selectbox("默认模型提供者", list(API_PROVIDERS.keys()), key="global_provider")
-    st.session_state.api_key = st.text_input("全局 API Key", type="password", value=st.session_state.api_key)
-    st.session_state.base_url = st.text_input("API 地址", value=st.session_state.base_url or API_PROVIDERS[provider_name]["url"])
-    st.session_state.model_name = st.text_input("模型名称", value=st.session_state.model_name or API_PROVIDERS[provider_name]["model"])
-    col_api1, col_api2 = st.columns(2)
-    with col_api1:
-        if st.button("🔌 测试连接", use_container_width=True):
-            with st.spinner("测试中..."):
-                try: get_ai_client()[0].models.list(); st.success("✅ 成功！")
-                except Exception as e: st.error(f"❌ 失败：{e}")
-    with col_api2: st.session_state.temperature = st.slider("🌡️ 温度", 0.0, 1.5, st.session_state.temperature, 0.1)
+# ============================================================
+# 11. 剧情推演 & 命运骰子
+# ============================================================
+def plot_suggestions() -> str:
+    p = P()
+    recent = "\n".join(
+        f"{m['speaker']}：{m['content']}" if m["type"] == "character"
+        else f"（{m['type']}）{m['content']}"
+        for m in p["chat"][-10:]
+    )
+    sys = "你是编剧。根据当前剧情，给出 3 个接下来可选的走向，每个 50 字内，用数字 1/2/3 开头。"
+    return call_ai(sys, recent or "故事刚开始。", temperature=1.0)
 
-    st.divider()
-    st.subheader("📖 共享剧本设定")
-    st.session_state.worldview = st.text_area("世界观", value=st.session_state.worldview, height=80)
-    st.session_state.outline = st.text_area("当前章节大纲", value=st.session_state.outline, height=80)
 
-    st.divider()
-    st.subheader("⚙️ 自定义快捷指令")
-    new_cmd = st.text_input("添加自定义快捷指令")
-    if st.button("➕ 添加快捷键"):
-        if new_cmd and new_cmd not in st.session_state.custom_quick_commands:
-            st.session_state.custom_quick_commands.append(new_cmd); st.rerun()
-    if st.session_state.custom_quick_commands: st.caption(f"已有指令：{', '.join(st.session_state.custom_quick_commands[:3])}...")
+def roll_dice() -> str:
+    p = P()
+    recent = "\n".join(
+        m["content"] for m in p["chat"][-6:] if m["type"] in ("character", "narration")
+    )
+    sys = (
+        "你是导演助手。根据当前剧情，随机丢出一个突发事件（如停电、巨响、匿名短信、"
+        "陌生人闯入、天气骤变等），要求：\n"
+        "1. 一句话描述事件本身；\n"
+        "2. 一句话说明它如何打乱当前局面；\n"
+        "3. 不要替角色做决定。"
+    )
+    return call_ai(sys, recent or "场景尚未开始。", temperature=1.2)
 
-    st.divider()
-    st.subheader("📚 小说资料库 (独立导出)")
-    if st.session_state.worldview: st.download_button("⬇️ 下载 世界观.txt", data=st.session_state.worldview.encode("utf-8"), file_name="世界观.txt", mime="text/plain", use_container_width=True)
-    if st.session_state.outline: st.download_button("⬇️ 下载 大纲.txt", data=st.session_state.outline.encode("utf-8"), file_name="大纲.txt", mime="text/plain", use_container_width=True)
-    if st.session_state.characters:
-        char_txt = "========== 人物库与记忆 ==========\n\n"
-        for name, char in st.session_state.characters.items():
-            char_txt += f"【角色：{name}】\n【类型】{char.get('type', '龙套')}\n【人设】{char.get('persona', '')}\n【秘密】{char.get('secret', '')}\n【记忆】\n{char.get('memory', '')}\n--------------------\n\n"
-        st.download_button("⬇️ 下载 人物库(含记忆).txt", data=char_txt.encode("utf-8"), file_name="人物库.txt", mime="text/plain", use_container_width=True)
-    if st.session_state.novel_text: st.download_button("⬇️ 下载 小说正文.txt", data=st.session_state.novel_text.encode("utf-8"), file_name="小说正文.txt", mime="text/plain", use_container_width=True)
 
-    st.divider()
-    st.subheader("📦 全量备份与恢复")
-    sync_ai = st.checkbox("导出时包含 AI 人设与记忆", value=True)
-    if st.button("📥 导出 TXT 备份"):
-        txt_content = "========== 🎬 AI导演工作台 备份文件 ==========\n\n========== 剧本设定 ==========\n"
-        txt_content += f"【世界观】\n{st.session_state.worldview}\n\n【大纲】\n{st.session_state.outline}\n\n"
-        if sync_ai:
-            txt_content += "========== 角色档案 ==========\n"
-            for name, char in st.session_state.characters.items():
-                txt_content += f"【角色：{name}】\n【类型】{char.get('type', '龙套')}\n【人设】{char.get('persona', '')}\n【秘密】{char.get('secret', '')}\n【记忆】\n{char.get('memory', '')}\n---\n"
-        txt_content += "\n========== 小说正文 ==========\n" + st.session_state.novel_text
-        st.download_button("⬇️ 下载 .txt 备份", data=txt_content.encode("utf-8"), file_name="novel_backup.txt", mime="text/plain", use_container_width=True)
+# ============================================================
+# 12. 导出 / 导入
+# ============================================================
+def export_txt(kind: str) -> str:
+    p = P()
+    w = p["world"]
+    if kind == "world":
+        lines = [f"《{w.get('title','')}》", ""]
+        for k, label in [("genre", "类型"), ("era", "背景"),
+                         ("places", "地点"), ("rules", "规则"), ("style", "文风")]:
+            if w.get(k):
+                lines.append(f"{label}：{w[k]}")
+        if p["outline"]:
+            lines += ["", "【总大纲】", p["outline"]]
+        if p["sub_outline"]:
+            lines += ["", "【细纲】", p["sub_outline"]]
+        return "\n".join(lines)
 
-    uploaded_txt = st.file_uploader("📤 导入 TXT 备份", type=["txt"], label_visibility="collapsed")
-    if uploaded_txt:
-        try:
-            content = uploaded_txt.read().decode("utf-8")
-            if "【世界观】" in content:
-                st.session_state.worldview = content.split("【世界观】")[1].split("【大纲】")[0].strip()
-                st.session_state.outline = content.split("【大纲】")[1].split("========== 角色档案 ==========")[0].strip() if "========== 角色档案 ==========" in content else content.split("【大纲】")[1].split("========== 小说正文 ==========")[0].strip()
-            if "========== 角色档案 ==========" in content and sync_ai:
-                char_section = content.split("========== 角色档案 ==========")[1].split("========== 小说正文 ==========")[0]
-                for block in char_section.split("---"):
-                    if "【角色：" in block:
-                        lines = block.strip().split("\n"); name = lines[0].replace("【角色：", "").replace("】", "").strip()
-                        char = {"type": "龙套", "persona": "", "secret": "", "memory": "", "is_present": True, "dialogue_count": 0, "api_key": "", "model_name": ""}
-                        for i, line in enumerate(lines):
-                            if line.startswith("【类型】"): char['type'] = line.replace("【类型】", "").strip()
-                            elif line.startswith("【人设】"): char['persona'] = line.replace("【人设】", "").strip()
-                            elif line.startswith("【秘密】"): char['secret'] = line.replace("【秘密】", "").strip()
-                            elif line.startswith("【记忆】"): char['memory'] = "\n".join(lines[i+1:]).strip()
-                        st.session_state.characters[name] = char
-            if "========== 小说正文 ==========" in content: st.session_state.novel_text = content.split("========== 小说正文 ==========")[1].strip()
-            st.success("✅ TXT 数据解析成功！"); st.rerun()
-        except Exception as e: st.error(f"解析失败: {e}")
-    uploaded_json = st.file_uploader("📤 导入 JSON 备份", type=["json"], label_visibility="collapsed")
-    if uploaded_json:
-        try:
-            data = json.loads(uploaded_json.read().decode("utf-8"))
-            for key in ["worldview", "outline", "characters", "novel_text", "messages", "style_pool", "style_profile"]:
-                if key in data: st.session_state[key] = data[key]
-            st.success("✅ JSON 数据恢复成功！"); st.rerun()
-        except Exception as e: st.error(f"JSON 文件损坏: {e}")
-            # ==============================================================================
-# 三、 主界面渲染（条件切换代替 Tabs）
-# ==============================================================================
+    if kind == "cast":
+        lines = []
+        for ch in p["characters"]:
+            lines.append(f"{ROLE_TAG[ch['role']]} {ch['name']}（{ch['role']}·{ch.get('status','')}）")
+            if ch.get("desc"):
+                lines.append(f"  人设：{ch['desc']}")
+            if ch.get("secret"):
+                lines.append(f"  秘密：{ch['secret']}")
+            if ch.get("memory"):
+                lines.append("  记忆：")
+                lines.extend(f"    - {m}" for m in ch["memory"])
+            lines.append("")
+        return "\n".join(lines) or "（暂无角色）"
 
-# ------------------------------------------------------------------------------
-# 页面 1：导演聊天室
-# ------------------------------------------------------------------------------
-if st.session_state.current_page == "chat":
-    if not st.session_state.characters: st.info("👈 请先去【角色管理】创建演员阵容。")
-    else:
-        st.markdown("### 🎭 演员在线状态（点击切换）")
-        cols = st.columns(min(len(st.session_state.characters), 5))
-        for idx, (name, char) in enumerate(st.session_state.characters.items()):
-            with cols[idx % 5]:
-                if st.button(f"{'🟢' if char.get('is_present') else '⚫'} {name}", use_container_width=True):
-                    char['is_present'] = not char.get('is_present', True); st.rerun()
+    if kind == "novel":
+        lines = [f"《{w.get('title','')}》", ""]
+        for m in p["chat"]:
+            if m["type"] == "character":
+                lines.append(f"{m['speaker']}：{m['content']}")
+            elif m["type"] == "narration":
+                lines.append(m["content"])
+            elif m["type"] == "chapter":
+                lines.append(m["content"])
+            lines.append("")
+        return "\n".join(lines)
 
-        for i, msg in enumerate(st.session_state.messages):
-            if msg["role"] == "director":
-                with st.chat_message("user", avatar="🎬"): st.markdown(f"**导演**：{msg['content']}")
-            else:
-                color = get_char_color(msg['name'])
-                with st.chat_message("assistant", avatar=get_char_emoji(msg['name'])):
-                    st.markdown(f"<span style='color:{color}; font-weight:bold;'>{msg['name']}</span>：{msg['content']}", unsafe_allow_html=True)
-                    if i == len(st.session_state.messages) - 1:
-                        col_edit, col_redo = st.columns([1, 1])
-                        with col_edit:
-                            if st.button("✏️ 修改这句", key=f"edit_{i}"): st.session_state.edit_index = i; st.session_state.edit_text = msg['content']
-                        with col_redo:
-                            if st.button("🔄 重说这句", key=f"redo_{i}"): st.session_state.messages.pop(); st.rerun()
+    return ""
 
-        if st.session_state.edit_index is not None:
-            with st.form("edit_form"):
-                new_text = st.text_area("修改台词", value=st.session_state.edit_text)
-                if st.form_submit_button("保存修改"):
-                    idx = st.session_state.edit_index; name = st.session_state.messages[idx]['name']
-                    st.session_state.messages[idx]['content'] = new_text
-                    st.session_state.characters[name]['memory'] += f"\n[导演修改] {new_text}"
-                    st.session_state.edit_index = None; st.rerun()
 
-        st.markdown("---")
-        st.caption("🎬 快捷指令控制台")
-        active_chars = [n for n, c in st.session_state.characters.items() if c.get('is_present')]
-        if active_chars:
-            c_at = st.columns(min(len(active_chars), 5))
-            for idx, name in enumerate(active_chars):
-                with c_at[idx % 5]:
-                    if st.button(f"@{name}", key=f"at_{name}"): st.session_state.current_input = f"@{name} "; st.rerun()
+def full_backup() -> dict:
+    return {
+        "version": 2,
+        "exported_at": now_str(),
+        "projects": st.session_state.projects,
+        "current_pid": st.session_state.current_pid,
+    }
 
-        c1, c2, c3, c4, c5 = st.columns(5)
-        if c1.button("👥 全员会议"): st.session_state.current_input = "所有人都在场，请依次发表意见。"
-        if c2.button("⚡ 突发事件"): st.session_state.current_input = random.choice(RANDOM_EVENTS)
-        if c3.button("📦 强制压缩"): st.session_state.current_input = "导演指令：执行记忆压缩。"
-        if c4.button("↩️ 撤销上一步"):
-            if st.session_state.messages:
-                st.session_state.messages.pop()
-                if st.session_state.messages and st.session_state.messages[-1]["role"] == "director": st.session_state.messages.pop()
+
+# ============================================================
+# 13. 侧边栏
+# ============================================================
+def render_sidebar():
+    with st.sidebar:
+        st.markdown("## 🎬 项目")
+
+        # 切换项目
+        pids = list(st.session_state.projects.keys())
+        names = [st.session_state.projects[i]["name"] for i in pids]
+        cur_idx = pids.index(st.session_state.current_pid)
+        sel = st.selectbox("当前剧本", range(len(pids)),
+                           format_func=lambda i: names[i], index=cur_idx)
+        if pids[sel] != st.session_state.current_pid:
+            st.session_state.current_pid = pids[sel]
+            st.rerun()
+
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("＋ 新建", use_container_width=True):
+                np_ = new_project(f"剧本{len(pids)+1}")
+                st.session_state.projects[np_["id"]] = np_
+                st.session_state.current_pid = np_["id"]
                 st.rerun()
-        with c5:
-            with st.expander("💡 剧情推演"):
-                if st.button("推演 3 个走向"):
-                    if st.session_state.messages:
-                        client, model = get_ai_client()
-                        res = client.chat.completions.create(model=model, messages=[{"role": "user", "content": f"根据大纲和最近对话，推演 3 个接下来的剧情走向建议。\n大纲：{st.session_state.outline}\n最近对话：{st.session_state.messages[-3:]}"}], temperature=0.9)
-                        st.markdown(res.choices[0].message.content.strip())
+        with c2:
+            if st.button("🗑 删除", use_container_width=True) and len(pids) > 1:
+                del st.session_state.projects[st.session_state.current_pid]
+                st.session_state.current_pid = list(st.session_state.projects.keys())[0]
+                st.rerun()
 
-        if st.session_state.current_input: st.rerun()
-        user_input = st.chat_input("输入导演指令（@角色名 呼叫发言，不@人 作为旁白）...")
-        if not user_input and st.session_state.current_input: user_input = st.session_state.current_input; st.session_state.current_input = ""
-        if user_input:
-            st.session_state.messages.append({"role": "director", "name": "导演", "content": user_input})
-            with st.chat_message("user", avatar="🎬"): st.markdown(f"**导演**：{user_input}")
-            targets = [name for name in st.session_state.characters.keys() if f"@{name}" in user_input]
-            if not targets: st.toast("已记录旁白。")
-            else:
-                for target in targets:
-                    char = st.session_state.characters[target]
-                    prompt = f"【世界观】{st.session_state.worldview}\n【大纲】{st.session_state.outline}\n【名字】{target}\n【人设】{char.get('persona','')}\n【秘密】{char.get('secret','')}\n【记忆】{char.get('memory','')}\n【最近对话】\n"
-                    for m in [x for x in st.session_state.messages if x['role'] != 'director'][-5:]: prompt += f"{m['name']}：{m['content']}\n"
-                    prompt += f"\n导演：{user_input}\n{st.session_state.prompt_character}\n请以 JSON 输出：{{\"reply\": \"台词(100字内)\", \"new_memory\": \"记忆(50字内)\"}}"
-                    client, model = get_ai_client(target)
-                    with st.spinner(f"🎭 {target} 正在思考..."):
-                        try:
-                            res = client.chat.completions.create(model=model, messages=[{"role": "user", "content": prompt}], temperature=st.session_state.temperature, response_format={"type": "json_object"})
-                            data = json.loads(res.choices[0].message.content.strip())
-                            reply, new_mem = data.get("reply", "..."), data.get("new_memory", "")
-                            with st.chat_message("assistant", avatar=get_char_emoji(target)): typewriter_effect(st.empty(), f"**{target}**：{reply}", 0.015)
-                            st.session_state.messages.append({"role": "ai", "name": target, "content": reply})
-                            if new_mem: char['memory'] = char.get('memory', '') + f"\n[新记忆] {new_mem}"
-                            char['dialogue_count'] = char.get('dialogue_count', 0) + 1
-                            if char.get('type') == '龙套' and char['dialogue_count'] >= 2:
-                                char['type'] = '配角'; st.toast(f"⭐ 龙套【{target}】升级为配角！")
-                            st.rerun()
-                        except Exception as e: st.error(f"失败：{e}")
+        P()["name"] = st.text_input("剧本名称", P()["name"])
 
-# ------------------------------------------------------------------------------
-# 页面 2：小说正文（含章节确认流程）
-# ------------------------------------------------------------------------------
-elif st.session_state.current_page == "novel":
-    st.subheader("📖 小说正文生成（绝对无内心戏）")
-    col_nar, col_clr = st.columns([1, 1])
-    with col_nar:
-        if st.button("✨ 召唤旁白写小说", type="primary", use_container_width=True):
-            if st.session_state.messages:
-                with st.spinner("叙述者正在写正文..."):
-                    style = st.session_state.get("style_profile", "")
-                    nar = f"【风格】{style}\n\n" if style else ""
-                    nar += f"【世界观】{st.session_state.worldview}\n【大纲】{st.session_state.outline}\n{st.session_state.prompt_narrator}\n"
-                    nar += "\n".join([f"{m['name']}：{m['content']}" for m in st.session_state.messages])
-                    try:
-                        client, model = get_ai_client()
-                        res = client.chat.completions.create(model=model, messages=[{"role": "user", "content": nar}], temperature=st.session_state.temperature)
-                        st.session_state.pending_chapter = res.choices[0].message.content.strip()
-                        st.rerun()
-                    except Exception as e: st.error(f"失败: {e}")
-    with col_clr:
-        if st.button("🗑️ 清空正文", use_container_width=True): st.session_state.novel_text = ""; st.rerun()
-
-    if st.session_state.pending_chapter:
-        st.info("📝 新章节已生成！请确认是否满意。")
-        col_confirm1, col_confirm2, col_confirm3 = st.columns(3)
-        with col_confirm1:
-            if st.button("✅ 保存本章到正文", type="primary"):
-                st.session_state.novel_text += "\n\n" + st.session_state.pending_chapter
-                st.session_state.pending_chapter = ""; st.success("已保存！"); st.rerun()
-        with col_confirm2:
-            if st.button("🧠 保存正文并存入AI记忆"):
-                st.session_state.novel_text += "\n\n" + st.session_state.pending_chapter
-                summary_prompt = f"请把以下章节内容压缩成一段80字以内的摘要，用于存入角色的记忆：\n{st.session_state.pending_chapter}"
-                try:
-                    client, model = get_ai_client()
-                    res = client.chat.completions.create(model=model, messages=[{"role": "user", "content": summary_prompt}])
-                    summary = res.choices[0].message.content.strip()
-                    for name, char in st.session_state.characters.items():
-                        if char.get('is_present'): char['memory'] += f"\n[本章记忆] {summary}"
-                    st.session_state.pending_chapter = ""; st.success("已保存正文，且摘要已存入AI记忆！"); st.rerun()
-                except Exception as e: st.error(f"记忆压缩失败：{e}")
-        with col_confirm3:
-            if st.button("🔄 重新生成本章"): st.session_state.pending_chapter = ""; st.rerun()
-        
-        with st.expander("👀 点击预览本章内容", expanded=True): st.markdown(st.session_state.pending_chapter)
-    else:
         st.divider()
-        st.markdown(st.session_state.novel_text if st.session_state.novel_text else "暂无正文，请点击上方按钮生成。")
 
-# ------------------------------------------------------------------------------
-# 页面 3：角色管理
-# ------------------------------------------------------------------------------
-elif st.session_state.current_page == "cast":
-    st.subheader("👥 演员阵容管理")
-    col_gen, col_batch = st.columns(2)
-    with col_gen:
-        st.markdown("**🤖 AI 自动生成阵容**")
-        num_chars = st.number_input("生成数量", 1, 5, 3)
-        if st.button("根据大纲一键生成角色", use_container_width=True):
-            with st.spinner("AI 正在构思人设..."):
-                client, model = get_ai_client()
-                prompt = f"根据世界观和大致大纲，生成 {num_chars} 个角色。只输出 JSON: {{\"characters\": [{{\"name\": \"\", \"type\": \"主角/配角/龙套\", \"persona\": \"\", \"secret\": \"\"}}]}}\n世界观：{st.session_state.worldview}\n大纲：{st.session_state.outline}"
+        # ---------------- API 配置 ----------------
+        st.markdown("## 🔌 接口")
+        cfg = st.session_state.api
+        cfg["api_key"] = st.text_input("API Key", cfg["api_key"], type="password")
+        cfg["base_url"] = st.text_input("Base URL", cfg["base_url"])
+        cfg["model"] = st.text_input("模型", cfg["model"])
+        cfg["temperature"] = st.slider("创造力", 0.0, 1.5, float(cfg["temperature"]), 0.05)
+
+        st.caption("以上为全局配置，所有 AI 默认使用。个别角色可在「剧组」单独配置。")
+
+        st.divider()
+
+        # ---------------- 工具 ----------------
+        st.markdown("## 🛠 工具")
+
+        if st.button("🎲 命运骰子", use_container_width=True):
+            with st.spinner("投掷中…"):
                 try:
-                    res = client.chat.completions.create(model=model, messages=[{"role": "user", "content": prompt}], temperature=0.8, response_format={"type": "json_object"})
-                    for c in json.loads(res.choices[0].message.content.strip()).get("characters", []):
-                        if c["name"] not in st.session_state.characters:
-                            st.session_state.characters[c["name"]] = {"type": c.get("type", "配角"), "persona": c.get("persona", ""), "secret": c.get("secret", ""), "memory": "初始记忆。", "is_present": True, "dialogue_count": 0, "api_key": "", "model_name": ""}
+                    ev = roll_dice()
+                    push_msg("director", f"【突发事件】{ev}")
                     st.rerun()
-                except Exception as e: st.error(f"生成失败：{e}")
-    with col_batch:
-        st.markdown("**➕ 手动批量创建**")
-        new_names = st.text_input("输入角色名（逗号隔开）", placeholder="林烨,苏婉,胖子")
-        if st.button("批量创建角色", use_container_width=True):
-            if new_names:
-                for name in [n.strip() for n in new_names.split(",")]:
-                    if name and name not in st.session_state.characters:
-                        st.session_state.characters[name] = {"type": "龙套", "persona": "", "secret": "", "memory": "", "is_present": True, "dialogue_count": 0, "api_key": "", "model_name": ""}
+                except Exception as e:
+                    st.error(f"失败：{e}")
+
+        if st.button("💡 剧情推演", use_container_width=True):
+            with st.spinner("推演中…"):
+                try:
+                    sug = plot_suggestions()
+                    push_msg("director", f"【剧情推演】\n{sug}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"失败：{e}")
+
+        if st.button("🗜 压缩记忆", use_container_width=True):
+            ok, msg = compress_memory()
+            (st.success if ok else st.warning)(msg)
+            if ok:
                 st.rerun()
 
-    if st.button("🎬 为所有不在场角色生成场外生活"):
-        with st.spinner("不在场的角色正在快进生活..."):
-            client, model = get_ai_client()
-            for name, char in st.session_state.characters.items():
-                if not char.get('is_present'):
-                    off_prompt = f"你是{name}。你现在不在主线剧情中。请用一句话（30字以内）快速记录你此刻的场外生活，写你正在做什么、想什么。不要推进主线。"
-                    try:
-                        res = client.chat.completions.create(model=model, messages=[{"role": "user", "content": off_prompt}])
-                        off_text = res.choices[0].message.content.strip()
-                        char['memory'] += f"\n[场外生活] {off_text}"
-                    except: pass
-            st.success("✅ 所有不在场角色的场外生活已同步至他们的独立记忆！"); st.rerun()
+        st.divider()
 
-    st.divider()
-    for name, char in list(st.session_state.characters.items()):
-        type_icon = "👑" if char.get('type') == "主角" else ("🎩" if char.get('type') == "配角" else "👤")
-        with st.expander(f"{type_icon} {name} —— 点击展开详细档案", expanded=False):
-            col_type, col_present, col_count = st.columns(3)
-            with col_type: char['type'] = st.selectbox("角色定位", ["主角", "配角", "龙套"], index=["主角", "配角", "龙套"].index(char.get('type', '龙套')), key=f"t_{name}")
-            with col_present: char['is_present'] = st.checkbox("当前在场（勾选才被调用）", value=char.get('is_present', True), key=f"p_{name}")
-            with col_count: char['dialogue_count'] = st.number_input("累积台词句数", value=char.get('dialogue_count', 0), key=f"d_{name}")
-            char['persona'] = st.text_area("📝 人物设定", value=char.get('persona', ''), key=f"per_{name}", height=60)
-            char['secret'] = st.text_input("🤫 秘密", value=char.get('secret', ''), key=f"sec_{name}")
-            char['memory'] = st.text_area("🧠 独立记忆（随时可手动篡改）", value=char.get('memory', ''), key=f"mem_{name}", height=80)
-            st.caption("⚙️ 高级选项：独立 API 配置（留空则继承全局）")
-            col_key, col_model = st.columns(2)
-            with col_key: char['api_key'] = st.text_input("专属 API Key", value=char.get('api_key', ''), type="password", key=f"key_{name}")
-            with col_model: char['model_name'] = st.text_input("专属模型名", value=char.get('model_name', ''), key=f"model_{name}")
-            if st.button(f"🗑️ 彻底删除角色 {name}", key=f"del_{name}"): del st.session_state.characters[name]; st.rerun()
-                # ------------------------------------------------------------------------------
-# 页面 4：风格蒸馏与融合
-# ------------------------------------------------------------------------------
-elif st.session_state.current_page == "tools":
-    st.subheader("🔬 风格蒸馏与融合控制台")
-    st.markdown(f"### 📚 当前风格库（{len(st.session_state.style_pool)} 种风格）")
-    if st.session_state.style_pool:
-        for idx, style in enumerate(st.session_state.style_pool):
-            with st.expander(f"风格 {idx+1}：{style['name']}"):
-                st.markdown(style['content'])
-                if st.button(f"删除此风格", key=f"del_style_{idx}"): st.session_state.style_pool.pop(idx); st.rerun()
-        if st.button("🗑️ 清空整个风格库"): st.session_state.style_pool = []; st.session_state.style_profile = ""; st.rerun()
-    st.divider()
-    tool_mode = st.radio("操作类型：", ["🎨 风格蒸馏", "📖 小说拆解"], horizontal=True)
-    uploaded_novel = st.file_uploader("📤 上传小说文本 (最大支持 10 万字)", type=["txt"])
-    if uploaded_novel is not None:
-        try:
-            raw_text = uploaded_novel.read().decode("utf-8", errors="ignore")
-            st.success(f"📊 文件已读取，总字数约：{len(raw_text)} 字")
-            if tool_mode == "🎨 风格蒸馏":
-                style_name = st.text_input("给这个风格起个名字", value=f"风格_{len(st.session_state.style_pool)+1}")
-                if st.button("✨ 开始深度蒸馏（Map-Reduce引擎）", type="primary"):
-                    with st.spinner("AI 正在深度拆解小说写作公式..."):
-                        client, model = get_ai_client()
-                        final_style_guide = map_reduce_style_distillation(raw_text, style_name, client, model)
-                        if final_style_guide:
-                            st.session_state.style_pool.append({"name": style_name, "content": final_style_guide})
-                            st.success(f"✅ 风格【{style_name}】已完美存入风格库！"); st.rerun()
-            elif tool_mode == "📖 小说拆解":
-                if st.button("🔍 开始拆解并填入工作台", type="primary"):
-                    with st.spinner("AI 正在拆解..."):
-                        client, model = get_ai_client()
-                        sample_text = raw_text[:6000] 
-                        prompt = f"请深度拆解以下小说片段。只输出严格 JSON：{{\"worldview\": \"\", \"characters\": [{{\"name\":\"\",\"persona\":\"\",\"secret\":\"\"}}], \"outline\": \"\"}}\n片段：\n{sample_text}"
-                        res = client.chat.completions.create(model=model, messages=[{"role": "user", "content": prompt}], temperature=0.7, response_format={"type": "json_object"})
-                        data = json.loads(res.choices[0].message.content.strip())
-                        st.session_state.worldview = data.get("worldview", ""); st.session_state.outline = data.get("outline", "")
-                        for c in data.get("characters", []):
-                            if c.get("name") and c["name"] not in st.session_state.characters:
-                                st.session_state.characters[c["name"]] = {"type": "配角", "persona": c.get("persona", ""), "secret": c.get("secret", ""), "memory": "刚被拆解。", "is_present": True, "dialogue_count": 0, "api_key": "", "model_name": ""}
+        # ---------------- 导出 ----------------
+        st.markdown("## 💾 导出")
+        for label, kind in [("世界观 TXT", "world"), ("人物库 TXT", "cast"), ("小说正文 TXT", "novel")]:
+            st.download_button(
+                label,
+                data=export_txt(kind),
+                file_name=f"{P()['name']}_{kind}.txt",
+                mime="text/plain",
+                use_container_width=True,
+            )
+
+        st.download_button(
+            "全量 JSON 备份",
+            data=json.dumps(full_backup(), ensure_ascii=False, indent=2),
+            file_name=f"backup_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+
+        up = st.file_uploader("导入 JSON 备份", type=["json"])
+        if up is not None:
+            tag = f"{up.name}_{up.size}"
+            if st.session_state.last_upload != tag:
+                try:
+                    data = json.load(up)
+                    if "projects" in data:
+                        st.session_state.projects = data["projects"]
+                        st.session_state.current_pid = data.get(
+                            "current_pid", list(data["projects"].keys())[0]
+                        )
+                    st.session_state.last_upload = tag
+                    st.success("已恢复备份")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"导入失败：{e}")
+
+        st.divider()
+        st.caption(
+            f"项目 {len(st.session_state.projects)} · "
+            f"角色 {len(P()['characters'])} · "
+            f"消息 {len(P()['chat'])}"
+        )
+
+
+# ============================================================
+# 14. 剧组管理
+# ============================================================
+def render_cast_tab():
+    st.subheader("🎭 剧组")
+    st.caption("人物设定进入各自的信息隔离上下文。龙套台词超标将自动升级。")
+
+    p = P()
+    for role in ROLE_ORDER:
+        group = [(i, c) for i, c in enumerate(p["characters"]) if c.get("role") == role]
+        if not group:
+            continue
+        st.markdown(f"### {ROLE_TAG[role]} {role}（{len(group)}）")
+        for i, ch in group:
+            with st.expander(f"{ch['emoji']} {ch['name']}", expanded=False):
+                ch["name"] = st.text_input("姓名", ch["name"], key=f"n_{ch['id']}")
+                c1, c2 = st.columns(2)
+                with c1:
+                    ch["role"] = st.selectbox("定位", ROLE_ORDER,
+                        index=ROLE_ORDER.index(ch["role"]), key=f"r_{ch['id']}")
+                with c2:
+                    ch["status"] = st.text_input("状态", ch.get("status", ""), key=f"st_{ch['id']}")
+
+                ch["desc"] = st.text_area("人设", ch.get("desc", ""), height=80, key=f"d_{ch['id']}")
+                ch["secret"] = st.text_area("秘密", ch.get("secret", ""), height=60, key=f"sc_{ch['id']}")
+                ch["offstage"] = st.text_input("场外状态", ch.get("offstage", ""), key=f"of_{ch['id']}",
+                    placeholder="不在场时他在做什么")
+
+                # 私有记忆
+                with st.popover("查看 / 修改私有记忆"):
+                    mem_text = st.text_area(
+                        "每行一条",
+                        "\n".join(ch.get("memory", [])),
+                        height=140,
+                        key=f"mem_{ch['id']}",
+                    )
+                    if st.button("保存记忆", key=f"sm_{ch['id']}"):
+                        ch["memory"] = [ln.strip() for ln in mem_text.splitlines() if ln.strip()]
+                        st.success("已保存")
                         st.rerun()
-        except Exception as e: st.error(f"读取失败：{e}")
-    if len(st.session_state.style_pool) >= 2:
-        if st.button("💥 开始融合所有风格"):
-            with st.spinner("融合中..."):
-                client, model = get_ai_client()
-                pool = "\n\n---\n\n".join([f"【{s['name']}】\n{s['content']}" for s in st.session_state.style_pool])
-                res = client.chat.completions.create(model=model, messages=[{"role": "user", "content": f"融合以下风格为一份终极写作指南：\n{pool}"}])
-                st.session_state.style_profile = f"【终极融合风格】\n{res.choices[0].message.content.strip()}"
-                st.success("✅ 融合成功！已生效。")
 
-# ------------------------------------------------------------------------------
-# 页面 5：关系网与系统数据
-# ------------------------------------------------------------------------------
-elif st.session_state.current_page == "relations":
-    st.subheader("🕸️ 角色关系网推演")
-    if st.button("🔍 分析当前角色关系", type="primary"):
-        if st.session_state.messages:
-            with st.spinner("AI 正在推演..."):
-                client, model = get_ai_client()
-                recent = "\n".join([f"{m['name']}：{m['content']}" for m in st.session_state.messages[-10:]])
-                prompt = f"根据对话，分析角色动态关系。输出格式：\n- A --> B : 怀疑\n- B --> C : 信任\n直接输出列表，不要客套。\n对话：\n{recent}"
-                res = client.chat.completions.create(model=model, messages=[{"role": "user", "content": prompt}], temperature=0.7)
-                st.markdown("### 📊 当前关系网")
-                st.markdown(res.choices[0].message.content.strip())
-        else: st.warning("还没有对话记录。")
-    
+                # 独立 API 配置（双层路由）
+                with st.popover("独立模型配置（可选）"):
+                    ov = ch.get("api_override") or {}
+                    k = st.text_input("Key", ov.get("api_key", ""), type="password", key=f"ak_{ch['id']}")
+                    b = st.text_input("Base URL", ov.get("base_url", ""), key=f"ab_{ch['id']}")
+                    m = st.text_input("模型", ov.get("model", ""), key=f"am_{ch['id']}")
+                    c1, c2 = st.columns(2)
+                    if c1.button("保存", key=f"sv_{ch['id']}"):
+                        ch["api_override"] = {"api_key": k, "base_url": b, "model": m} if (k or b or m) else None
+                        st.success("已保存")
+                    if c2.button("清除", key=f"cl_{ch['id']}"):
+                        ch["api_override"] = None
+                        st.rerun()
+
+                b1, b2 = st.columns(2)
+                if role == "龙套" and b1.button("升级为配角", key=f"up_{ch['id']}", use_container_width=True):
+                    ch["role"] = "配角"
+                    st.rerun()
+                elif role == "配角" and b1.button("升级为主角", key=f"up_{ch['id']}", use_container_width=True):
+                    ch["role"] = "主角"
+                    st.rerun()
+                if b2.button("删除", key=f"del_{ch['id']}", use_container_width=True):
+                    p["characters"].pop(i)
+                    st.rerun()
+
     st.divider()
-    st.subheader("📊 系统数据统计")
-    col_stat1, col_stat2, col_stat3 = st.columns(3)
-    col_stat1.metric("角色总数", len(st.session_state.characters))
-    col_stat2.metric("对话条数", len(st.session_state.messages))
-    col_stat3.metric("正文字数", len(st.session_state.novel_text))
-    st.caption(f"上次自动快照时间：{st.session_state.auto_save_time if st.session_state.auto_save_time else '暂无'}")
-    if st.button("💾 立即执行快照保存"): auto_save_snapshot()
+    st.markdown("### ➕ 添加角色")
+    with st.form("add_char", clear_on_submit=True):
+        c1, c2, c3 = st.columns([2, 1, 1])
+        name = c1.text_input("姓名")
+        role = c2.selectbox("定位", ROLE_ORDER, index=2)
+        status = c3.text_input("状态", "存活")
+        desc = st.text_area("人设", height=70)
+        secret = st.text_area("秘密", height=60)
+        if st.form_submit_button("添加", use_container_width=True):
+            if name.strip():
+                add_character(name.strip(), role, desc, secret, status)
+                st.rerun()
+            else:
+                st.warning("姓名不能为空")
+
+
+# ============================================================
+# 15. 世界观 & 大纲
+# ============================================================
+def render_world_tab():
+    st.subheader("🌍 世界观与大纲")
+    p = P()
+    w = p["world"]
+
+    c1, c2 = st.columns(2)
+    w["title"] = c1.text_input("书名", w.get("title", ""))
+    w["genre"] = c2.text_input("类型", w.get("genre", ""))
+    c3, c4 = st.columns(2)
+    w["era"] = c3.text_input("背景", w.get("era", ""))
+    w["places"] = c4.text_input("地点", w.get("places", ""))
+    w["rules"] = st.text_area("规则", w.get("rules", ""), height=100)
+    w["style"] = st.text_area("文风", w.get("style", ""), height=70)
+
+    st.divider()
+    st.markdown("### 📐 大纲")
+
+    with st.form("plan_form"):
+        task = st.text_area(
+            "让规划 AI 帮你生成或补充大纲",
+            height=80,
+            placeholder="例：生成一个三幕式的故事大纲，主角是失忆的刺客。",
+        )
+        if st.form_submit_button("✨ 生成", use_container_width=True, type="primary"):
+            if task.strip():
+                with st.spinner("规划 AI 思考中…"):
+                    try:
+                        out = call_ai(build_planner_prompt(task), task)
+                        p["outline"] = (p["outline"] + "\n" + out).strip()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"失败：{e}")
+
+    p["outline"] = st.text_area("总大纲", p.get("outline", ""), height=160, key="outline_edit")
+    p["sub_outline"] = st.text_area("细纲", p.get("sub_outline", ""), height=120, key="sub_edit")
+
+    with st.expander("🔍 当前角色的信息隔离上下文预览"):
+        if p["characters"]:
+            sel = st.selectbox("查看角色", [c["name"] for c in p["characters"]], key="ctx_sel")
+            ch = find_char(sel)
+            if ch:
+                st.code(build_character_context(ch), language="text")
+        else:
+            st.info("暂无角色。")
+
+
+# ============================================================
+# 16. 写作台（聊天流）
+# ============================================================
+def render_write_tab():
+    p = P()
+
+    if not p["chat"]:
+        st.info(
+            "**导演，可以开拍了。**\n\n"
+            "· 在下方输入框 **@角色名** 唤醒对应 AI 发言；\n"
+            "· 不 @ 人时，你输入的内容会作为**导演指令**记录；\n"
+            "· 点侧边栏的「命运骰子」「剧情推演」可以搅动剧情；\n"
+            "· 卡文时点「🗜 压缩记忆」，把前情凝练成长期记忆。"
+        )
+
+    # 渲染聊天流
+    for idx, m in enumerate(p["chat"]):
+        if m["type"] == "character":
+            ch = get_char(m.get("cid", ""))
+            color = ch["color"] if ch else "#333"
+            emoji = ch["emoji"] if ch else "🎭"
+            with st.chat_message("assistant"):
+                st.markdown(
+                    f"<span style='color:{color};font-weight:700'>{emoji} {m['speaker']}</span>",
+                    unsafe_allow_html=True,
+                )
+                st.markdown(m["content"])
+                # 改写台词
+                if st.button("✏️ 改写", key=f"edit_{idx}"):
+                    st.session_state[f"editing_{idx}"] = True
+                if st.session_state.get(f"editing_{idx}"):
+                    new = st.text_area("修改台词", m["content"], key=f"ta_{idx}", height=100)
+                    if st.button("保存修改", key=f"save_{idx}"):
+                        m["content"] = new
+                        # 同步写入角色私有记忆
+                        if ch:
+                            ch["memory"] = (ch["memory"] + [f"我（{ch['name']}）说：{new[:60]}..."])[-20:]
+                        st.session_state[f"editing_{idx}"] = False
+                        st.rerun()
+        elif m["type"] == "narration":
+            st.markdown(f"<div class='narration'>📖 {m['content']}</div>", unsafe_allow_html=True)
+        elif m["type"] == "director":
+            st.markdown(f"<div class='director'>🎬 导演：{m['content']}</div>", unsafe_allow_html=True)
+        elif m["type"] == "chapter":
+            st.markdown(f"<div class='chap'>📄 正文：<br>{m['content']}</div>", unsafe_allow_html=True)
+
+    st.divider()
+
+    # 快捷指令栏
+    if p["characters"]:
+        st.caption("快捷 @ 唤醒：")
+        cols = st.columns(min(len(p["characters"]), 5))
+        for i, ch in enumerate(p["characters"][:5]):
+            if cols[i].button(f"{ch['emoji']} {ch['name']}", key=f"quick_{ch['id']}", use_container_width=True):
+                st.session_state.quick_input = f"@{ch['name']} "
+
+    # 输入框
+    default_text = st.session_state.pop("quick_input", "")
+    with st.form("write_form", clear_on_submit=True):
+        text = st.text_area(
+            "输入",
+            value=default_text,
+            height=90,
+            placeholder="@角色名 说点什么，或写下导演指令…",
+            label_visibility="collapsed",
+        )
+        c1, c2, c3 = st.columns([2, 1, 1])
+        go = c1.form_submit_button("▶ 发送", use_container_width=True, type="primary")
+        do_narr = c2.form_submit_button("📖 让旁白剪辑", use_container_width=True)
+        do_clear = c3.form_submit_button("🧹 清空", use_container_width=True)
+
+    if do_clear:
+        p["chat"] = []
+        st.rerun()
+
+    if do_narr:
+        if not st.session_state.api["api_key"]:
+            st.error("请先配置 API Key。")
+        else:
+            with st.spinner("叙述者剪辑中…"):
+                try:
+                    out = generate_narration()
+                    push_msg("narration", out)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"失败：{e}")
+
+    if go and text.strip():
+        handle_input(text.strip())
+
+
+def handle_input(text: str):
+    """处理导演输入：解析 @角色，唤醒对应 AI。"""
+    p = P()
+    if not st.session_state.api["api_key"]:
+        st.error("请先在侧边栏配置 API Key。")
+        return
+
+    # 解析 @
+    mentioned = re.findall(r"@([^\s@，,。！？!?]+)", text)
+    targets = []
+    for name in mentioned:
+        ch = find_char(name)
+        if ch and ch not in targets:
+            targets.append(ch)
+
+    if not targets:
+        push_msg("director", text)
+        st.rerun()
+        return
+
+    # 先记录导演的指令
+    push_msg("director", text)
+
+    # 依次唤醒（无状态框架下无法并行）
+    for ch in targets:
+        with st.spinner(f"{ch['name']} 正在表演…"):
+            try:
+                instruction = text
+                out = generate_speech(ch, instruction)
+                push_msg("character", out, speaker=ch["name"], cid=ch["id"])
+
+                # 台词计数（龙套升级）
+                ch["speech_count"] = ch.get("speech_count", 0) + count_sentences(out)
+                check_rookie_upgrade(ch)
+            except Exception as e:
+                st.error(f"{ch['name']} 生成失败：{e}")
+
+    st.rerun()
+
+
+# ============================================================
+# 17. 章节确认
+# ============================================================
+def render_chapter_bar():
+    """当有新的角色发言时，提供"整章成文"的入口。"""
+    p = P()
+    if len(p["chat"]) < 3:
+        return
+
+    # 用 popover 收进侧边，避免干扰
+    with st.sidebar:
+        st.divider()
+        st.markdown("## 📄 章节")
+        if st.button("把当前对话剪辑成章", use_container_width=True):
+            with st.spinner("叙述者剪辑中…"):
+                try:
+                    out = generate_narration()
+                    st.session_state.pending_chapter = out
+                except Exception as e:
+                    st.error(f"失败：{e}")
+
+        if st.session_state.pending_chapter:
+            st.text_area("预览", st.session_state.pending_chapter, height=200, key="ch_prev")
+            c1, c2, c3 = st.columns(3)
+            if c1.button("保存", use_container_width=True):
+                push_msg("chapter", st.session_state.pending_chapter)
+                st.session_state.pending_chapter = None
+                st.rerun()
+            if c2.button("存记忆", use_container_width=True):
+                for ch in p["characters"]:
+                    if ch["role"] in ("主角", "配角"):
+                        ch["memory"] = (ch["memory"] + [st.session_state.pending_chapter[:120]])[-20:]
+                st.success("已写入各角色私有记忆")
+            if c3.button("重写", use_container_width=True):
+                st.session_state.pending_chapter = None
+                st.rerun()
+
+
+# ============================================================
+# 18. 主界面
+# ============================================================
+render_sidebar()
+
+# 顶部标题
+head_l, head_r = st.columns([3, 1])
+with head_l:
+    title = P()["world"].get("title") or P()["name"]
+    st.markdown(f"## 🎬 {title}")
+with head_r:
+    st.caption(
+        f"角色 {len(P()['characters'])} · 消息 {len(P()['chat'])}"
+    )
+
+tab_write, tab_cast, tab_world = st.tabs(["✍️ 写作台", "🎭 剧组", "🌍 世界观"])
+
+with tab_write:
+    render_write_tab()
+
+with tab_cast:
+    render_cast_tab()
+
+with tab_world:
+    render_world_tab()
+
+render_chapter_bar()
